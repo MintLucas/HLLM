@@ -1,0 +1,26 @@
+name: "bert-embedding"
+backend: "python"
+max_batch_size: 0
+input [
+  {
+    name: "text_input"
+    data_type: TYPE_STRING
+    dims: [ -1 ]
+  }
+]
+output [
+  {
+    name: "vector_output"
+    data_type: TYPE_FP32
+    dims: [ 768 ]  # 根据实际模型输出维度调整
+  }
+]
+instance_group [
+  {
+    kind: KIND_GPU  # 如果使用CPU改为KIND_CPU
+  }
+]
+#dynamic_batching {
+#  preferred_batch_size: [ 1, 4, 8, 16 ]
+#  max_queue_delay_microseconds: 100
+#}
