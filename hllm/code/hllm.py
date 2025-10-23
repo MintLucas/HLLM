@@ -353,10 +353,45 @@ def train_discriminative(ddp_model, dataloader, sampler, optimizer, local_rank, 
 
             torch.save(checkpoint, "/njfs/train-comment/example/gaolin3/hllm/checkpoint."+str(epoch))
 
+def local_set():
+
+    # --- 调试时手动设置环境变量 ---
+    # 注意：这些设置通常只用于单进程调试或特殊情况。
+    # 在生产环境中，推荐使用 torchrun。
+
+    # 1. 进程排名 (RANK): 必须设置，这里设置为 0 (第一个进程)
+    os.environ['RANK'] = '0' 
+    os.environ["LOCAL_RANK"] = '0'
+    # 2. 总进程数 (WORLD_SIZE): 必须设置，这里设置为 1 (只运行一个进程进行调试)
+    os.environ['WORLD_SIZE'] = '1'
+    
+    # 3. 主节点地址 (MASTER_ADDR): 必须设置，可以使用本地回环地址
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    
+    # 4. 主节点端口 (MASTER_PORT): 必须设置，选择一个未被占用的端口
+    os.environ['MASTER_PORT'] = '29500' # 29500 是 PyTorch 分布式常用的默认端口
+    
+    print(f"DEBUG: Setting RANK={os.environ['RANK']}, WORLD_SIZE={os.environ['WORLD_SIZE']}")
+    # ------------------------------------
+
+    try:
+        # 你的原始代码:
+        # File "/data2/zhipeng16/git/HLLM/hllm/code/hllm.py", line 365, in main
+        dist.init_process_group(backend="nccl") 
+        print("Distributed group initialized successfully.")
+        
+        # ... 后续的训练/推理代码 ...
+
+    except ValueError as e:
+        print(f"Error during init_process_group: {e}")
+        # 如果你设置了，但仍然报错，可以检查其他环境变量或配置
+        
+    # ...
+    pass # 示例中省略了 main 函数的其余部分
 
 def main():
 
-
+    local_set()
     batch_size = 8
     seq_len = 20
     hidden_size = 768
