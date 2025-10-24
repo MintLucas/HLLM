@@ -19,8 +19,8 @@ class ItemLLM(nn.Module):
         super(ItemLLM, self).__init__()
         self.device = device
         # 加载预训练语言模型
-        self.llm = AutoModel.from_pretrained(model_name, cache_dir='/workspace/work/zhipeng16/models/hub').to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name,cache_dir='/workspace/work/zhipeng16/models/hub')
+        self.llm = AutoModel.from_pretrained(model_name, cache_dir='/njfs/train-comment/example/gaolin3/hllm/hub').to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name,cache_dir='/njfs/train-comment/example/gaolin3/hllm/hub')
         
         # 添加特殊token用于提取物品特征
         self.item_token = "[ITEM]"
@@ -360,7 +360,6 @@ def local_set():
     # 在生产环境中，推荐使用 torchrun。
 
     # 1. 进程排名 (RANK): 必须设置，这里设置为 0 (第一个进程)
-    os.environ['CUDA_VISIBLE_DEVICES'] = '3'
     os.environ['RANK'] = '0' 
     os.environ["LOCAL_RANK"] = '0'
     # 2. 总进程数 (WORLD_SIZE): 必须设置，这里设置为 1 (只运行一个进程进行调试)
@@ -396,8 +395,8 @@ def main():
     batch_size = 8
     seq_len = 20
     hidden_size = 768
-    local_rank = int(os.environ["LOCAL_RANK"])
-    # dist.init_process_group(backend="nccl")
+    # local_rank = int(os.environ["LOCAL_RANK"])
+    dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
 
@@ -408,7 +407,7 @@ def main():
 
     optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
 
-    with open("/workspace/work/zhipeng16/HLLM/hllm/data/data.json", "r", encoding="utf-8") as f:
+    with open("/njfs/train-comment/example/gaolin3/hllm/data.json", "r", encoding="utf-8") as f:
         sample_data = json.load(f)  # 反序列化为 Python 字典
 
 
