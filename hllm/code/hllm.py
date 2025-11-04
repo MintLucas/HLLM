@@ -6,7 +6,7 @@ import math
 import json
 import os
 import logging
-
+import random
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -157,10 +157,12 @@ class HLLM(nn.Module):
             # 生成式任务: 预测下一个物品
             return self.user_llm(item_embs), self.item_llm(next_text)
         else:
-            # 判别式任务: 计算用户特征与目标物品特征的相似度
+            # 判别式任务: 计算用户特征与目标物品特征的相似度；sigmoid只输入一个相似度得分
+            #next_text和target_text的区别，next_text恒正样本,target_text不一定可能是负样本
             target_emb = self.item_llm(target_text)
             user_emb = self.user_llm(item_embs)
-            return torch.cosine_similarity(user_emb, target_emb, dim=-1)
+            #混合训练用；next_text
+            return user_emb, target_emb, self.item_llm(next_text)
 
 
 
@@ -175,6 +177,7 @@ def info_nce_loss(predicted, positive, temperature=0.1, num_negatives=10):
     """
     # 随机采样负样本 (简化实现)
     batch_size = predicted.size(0)
+    #从batch中随机抽num_negatives个负样本；num_negatives要>batch，不然随机抽会大概率抽到正样本
     neg_indices = torch.randint(0, batch_size, (batch_size, num_negatives))
     negatives = positive[neg_indices]  # (batch_size, num_negatives, hidden_size)
     
@@ -261,14 +264,27 @@ class RecommendationDataset(Dataset):
         history = [clean_text(s)[:100] for s in history]
         next_item = user_data['history'][-1] if len(user_data['history']) > self.seq_length else user_data['history'][-1]
         
-        return {
-            'history_texts': history,
-            'next_texts': next_item,
-            'target_texts': next_item,  # 用于判别式任务
-            'labels': 1.0  # 正样本
-        }
+        positive_text = user_data['history'][-1] # 正样本
+        negative_text =  user_data['history'][random.randint(0, len(user_data['history']) - 1)]# 随机采样一个负样本
 
-def train_generative(ddp_model, dataloader, sampler, optimizer, local_rank):
+        # 随机决定这次是返回正样本还是负样本
+        if random.random() > 0.5:
+            # 返回正样本
+            return {
+                'history_texts': history,
+                'next_texts': positive_text, # 生成式任务的答案永远是正样本
+                'target_texts': positive_text, # 判别式任务的考题是正样本
+                'labels': torch.tensor(1.0, dtype=torch.float32)
+            }
+        else:
+            # 返回负样本
+            return {
+                'history_texts': history,
+                'next_texts': positive_text, # 生成式任务的答案永远是正样本
+                'target_texts': negative_text, # 判别式任务的考题是负样本
+                'labels': torch.tensor(0.0, dtype=torch.float32) 
+            }
+def train_generative(ddp_model, dataloader, sampler, optimizer, local_rank, seq_len, batch_size):
     scaler = torch.cuda.amp.GradScaler()
 
     for epoch in range(3):
@@ -277,6 +293,9 @@ def train_generative(ddp_model, dataloader, sampler, optimizer, local_rank):
         total_loss = 0
     
         for batch in dataloader:
+            #DataLoader 对批量样本的默认拼接方式:[样本1的(seq_len,), 样本2的(seq_len,), ..., 样本8的(seq_len,)]=[batch,seq]
+            #history_texts 是字符串列表（非 Tensor），DataLoader 对非 Tensor 类型的批量数据会使用 default_collate 函数处理。对于列表类型：若每个样本是长度为 seq_len 的列表，批量聚合时会将 所有样本的第 i 个元素放在一起，形成一个新的列表。
+            #第 1 个元素是 8 个样本的第 1 条历史文本;第 2 个元素是 8 个样本的第 2 条历史文本;=[seq, batch]
             # 获取批次数据
             history_texts = batch['history_texts']  # (batch_size, seq_len)
             next_texts = batch['next_texts']  # (batch_size,)
@@ -322,15 +341,20 @@ def train_discriminative(ddp_model, dataloader, sampler, optimizer, local_rank, 
             # 前向传播
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                predicted_embs,next_embs = ddp_model(history_texts, next_text=next_texts)
+                # predicted_embs,next_embs = ddp_model(history_texts, next_text=next_texts)
+
+
+                
+                #排序阶段判别式训练；需要一次性加载两个emb
+                predicted_embs,target_emb,next_embs = ddp_model(history_texts, next_text=next_texts, target_text=target_texts)
                 # 计算InfoNCE损失
-                loss = info_nce_loss(predicted_embs, next_embs)
-
-                #logits = ddp_model(history_texts, target_texts)
-                # 计算交叉熵损失
-                #bce_loss = nn.BCEWithLogitsLoss()(logits, labels.float())
-
-                #loss = bce_loss + 0.5 * info_nce_loss
+                nce_loss = info_nce_loss(predicted_embs, next_embs)
+                
+                # 计算交叉熵损失;labels默认在cpu上换到gpu
+                logits = torch.cosine_similarity(predicted_embs, target_emb, dim=-1)
+                bce_loss = nn.BCEWithLogitsLoss()(logits, labels.to(logits.device))
+                
+                loss = bce_loss + 0.5 * nce_loss
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -351,7 +375,7 @@ def train_discriminative(ddp_model, dataloader, sampler, optimizer, local_rank, 
                 'loss': loss.item(),
             }
 
-            torch.save(checkpoint, "/njfs/train-comment/example/gaolin3/hllm/checkpoint."+str(epoch))
+            # torch.save(checkpoint, "/njfs/train-comment/example/gaolin3/hllm/checkpoint."+str(epoch))
 
 def local_set():
 
@@ -370,7 +394,7 @@ def local_set():
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     
     # 4. 主节点端口 (MASTER_PORT): 必须设置，选择一个未被占用的端口
-    os.environ['MASTER_PORT'] = '29500' # 29500 是 PyTorch 分布式常用的默认端口
+    os.environ['MASTER_PORT'] = '29501' # 29500 是 PyTorch 分布式常用的默认端口
     
     print(f"DEBUG: Setting RANK={os.environ['RANK']}, WORLD_SIZE={os.environ['WORLD_SIZE']}")
     # ------------------------------------
@@ -457,6 +481,7 @@ def main():
     #         print(f"Epoch {epoch}, Loss: {total_loss / len(dataloader)}")
 
     train_discriminative(ddp_model, dataloader,sampler, optimizer, local_rank, seq_len, batch_size)
+    # train_generative(ddp_model, dataloader,sampler, optimizer, local_rank, seq_len, batch_size)
     dist.destroy_process_group()
 
 if __name__ == "__main__":
